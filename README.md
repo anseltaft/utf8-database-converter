@@ -19,9 +19,12 @@ This is a modernization of Yihui Xie's original 2009–2011 plugin, rewritten fo
 
 ## Installation
 
-1. Copy the `utf8-database-converter` folder into `wp-content/plugins/`.
-2. Activate **UTF-8 Database Converter** on the Plugins screen.
-3. Go to **Tools → UTF-8 DB Converter**.
+1. Go to **Plugins** in the main menu.
+2. Click the **Add Plugin** button (top of the page).
+3. Click the **Upload Plugin** button (same spot on the top of the page).
+4. Wait for the plugin to install then click **Activate Plugin**.
+5. Go to **Tools → UTF-8 DB Converter** to use it.
+6. *Please remember to deactivate then delete the plugin when you're done using it!*
 
 ## Usage
 
