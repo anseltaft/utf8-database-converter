@@ -76,7 +76,7 @@ Once all tables show `utf8mb4` collations and no MyISAM tables remain, **deactiv
 
 ## Credits
 
-- Original plugin (2009–2011): [Yihui Xie](https://yihui.org/) — released under GPL-2.0-or-later.
+- Original plugin (2009–2011): [Yihui Xie](https://yihui.org/) — released under GPL-2.0-or-later ([archived repo](https://github.com/wp-plugins/utf-8-db-converter)).
 - Modernized rewrite (2026): PHP 7.4–8.5 compatibility, `utf8mb4` target, backups, table/engine selection.
 
 ## License
