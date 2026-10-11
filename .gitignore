@@ -1,0 +1,34 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~
+
+# Dependencies & tooling
+/vendor/
+/node_modules/
+composer.lock
+package-lock.json
+.phpunit.result.cache
+.phpcs-cache
+
+# Database dumps & backups (never commit these)
+*.sql
+*.sql.zip
+*.sql.gz
+*.zip
+*.tar
+*.tar.gz
+utf8dc-backups/
+
+# Logs
+*.log
+error_log
+debug.log
