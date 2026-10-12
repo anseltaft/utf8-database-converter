@@ -5,7 +5,7 @@ A WordPress plugin that modernizes legacy database schemas:
 1. **Backs up your entire database** and downloads it as a compressed `databasename.sql.zip` file.
 2. **Converts tables and their text columns to `utf8mb4`** (`utf8mb4_unicode_ci` collation) — the current, recommended UTF-8 character set for MySQL/MariaDB and WordPress — with per-table selection (all tables selected by default).
 3. **Converts MyISAM tables to InnoDB**, with per-table selection (all MyISAM tables selected by default).
-4. **Reminds you to remove the plugin** once conversions are complete.
+4. **Reminds you to remove the plugin** once conversions are complete — with an on-screen reminder, plus an admin-area-only warning notice on every wp-admin page if the plugin is still active 30 minutes after activation.
 
 This is a modernization of Yihui Xie's original 2009–2011 plugin, rewritten for PHP 7.4 through 8.5 and current WordPress APIs.
 
@@ -28,19 +28,31 @@ This is a modernization of Yihui Xie's original 2009–2011 plugin, rewritten fo
 
 ## Usage
 
-The admin screen walks you through four steps:
+Find the plugin under **Tools → UTF-8 DB Converter**. The admin screen is divided into these sections:
 
-### Step 1 — Back up the entire database
+### Section 1 — Back up the entire database
 
 Click **Back up & download now**. The plugin generates a full SQL dump (structure + data for every table), compresses it into `databasename.sql.zip`, and streams it to your browser. The temporary copy on the server is deleted immediately after download (and after 10 minutes the download link expires). Any leftover archives are also deleted when the plugin is deactivated.
 
 > **Do not skip this step.** `ALTER TABLE` operations can lose data if interrupted.
 
-### Step 2 — Convert tables to utf8mb4
+### Section 2 — Convert MyISAM tables to InnoDB
 
-The screen lists every table in the database with its engine and current collation. All tables are selected by default; use the checkboxes (or the *Select all / Select none / Select only non-utf8mb4 tables* links) to choose a subset, then click **Convert selected tables to utf8mb4**.
+If any tables use the MyISAM engine they are listed with checkboxes (all selected by default). Click **Convert selected tables to InnoDB** to run:
 
-Each selected table is converted with:
+```sql
+ALTER TABLE `table_name` ENGINE=InnoDB;
+```
+
+### Section 3 — Convert non-UTF-8 tables to utf8mb4
+
+Every table is listed with its engine and current collation:
+
+- ✅ `utf8mb4_unicode_ci` — the target, left **unselected** (nothing to do).
+- ✔ (yellow) other `utf8mb4` collations such as `utf8mb4_unicode_520_ci` — fine as-is, but can be converted to `utf8mb4_unicode_ci`; pre-selected.
+- No mark — any non-`utf8mb4` charset/collation; pre-selected.
+
+Use the checkboxes (or the *Select all / Select none / Select only tables needing conversion* links) to adjust, then click **Convert selected tables to utf8mb4**. Each selected table is converted with:
 
 ```sql
 ALTER TABLE `table_name` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -48,24 +60,20 @@ ALTER TABLE `table_name` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicod
 
 This updates the table default **and** every `CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET` column in one statement. Results (success or the MySQL error) are shown per table.
 
-### Step 3 — Convert MyISAM tables to InnoDB
+### Debug log
 
-If any tables use the MyISAM engine they are listed (all selected by default). Click **Convert selected tables to InnoDB** to run:
+Every backup and conversion step is appended to a debug log (`wp-content/utf8dc-backups/debug.log`, web access denied via `.htaccess`), including the exact SQL run for each table and whether it succeeded. If anything fails — including a PHP fatal error, which the plugin catches and logs — download the log from the plugin screen to see exactly what was and was not done. Tables listed after the last `OK:` line were not converted.
 
-```sql
-ALTER TABLE `table_name` ENGINE=InnoDB;
-```
+### Remove this plugin
 
-### Step 4 — Remove this plugin
-
-Once all tables show `utf8mb4` collations and no MyISAM tables remain, **deactivate and delete the plugin** from the Plugins screen. Leaving one-off administrative tools installed is an unnecessary security risk. The plugin detects the completed state and shows a reminder with a direct link.
+Once all tables show `utf8mb4` collations and no MyISAM tables remain, **deactivate and delete the plugin** from the Plugins screen. Leaving one-off administrative tools installed is an unnecessary security risk — if the plugin is still active 30 minutes after activation, a warning notice appears at the top of every wp-admin page until it is removed. Deactivation also deletes the debug log and any leftover backup archives, and uninstalling removes the activation-timestamp option and the `utf8dc-backups/` directory entirely.
 
 ## Security notes
 
 - All actions require the `manage_options` capability and WordPress nonces.
 - Table names are validated server-side against the real tables in the database; identifiers are backtick-escaped before reaching SQL.
 - All output is escaped (`esc_html`, `esc_attr`, `esc_url`).
-- Backup files are written to `wp-content/utf8dc-backups/` with `.htaccess` denial and an `index.php` guard, use random unguessable file names, expire after 10 minutes, and are deleted after streaming.
+- Backup files and the debug log are written to `wp-content/utf8dc-backups/` with `.htaccess` denial and an `index.php` guard, use random unguessable file names, expire after 10 minutes (expired archives are swept automatically), and are deleted after streaming.
 - The plugin performs no front-end activity whatsoever.
 
 ## Limitations

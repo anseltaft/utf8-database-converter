@@ -3,7 +3,7 @@
  * Plugin Name:       UTF-8 Database Converter
  * Plugin URI:        https://github.com/your-username/utf8-database-converter
  * Description:       Backs up your database (as a compressed SQL file), converts tables and columns to utf8mb4, and converts MyISAM tables to InnoDB. Remove this plugin when finished.
- * Version:           2.0.0
+ * Version:           2.1.0
  * Requires at least: 5.0
  * Requires PHP:      7.4
  * Author:            Yihui Xie (original), modernized for PHP 7.4–8.5
@@ -43,20 +43,60 @@ final class UTF8_Database_Converter {
 	const NONCE_DOWNLOAD   = 'utf8dc_download';
 	const NONCE_CHARSET    = 'utf8dc_charset';
 	const NONCE_ENGINE     = 'utf8dc_engine';
+	const NONCE_LOG        = 'utf8dc_log';
+	const LOG_FILE         = 'debug.log';
 	const TARGET_CHARSET   = 'utf8mb4';
 	const TARGET_COLLATION = 'utf8mb4_unicode_ci';
 	const TARGET_ENGINE    = 'InnoDB';
 	const BACKUP_TTL       = 600; // 10 minutes.
+	const REMINDER_DELAY   = 1800; // 30 minutes.
+	const OPTION_ACTIVATED = 'utf8dc_activated_at';
 	const DUMP_CHUNK_ROWS  = 500;
 
 	public static function init(): void {
 		add_action( 'admin_menu', array( __CLASS__, 'register_menu' ) );
+		add_action( 'admin_notices', array( __CLASS__, 'reminder_notice' ) );
 		add_action( 'admin_post_utf8dc_backup', array( __CLASS__, 'handle_backup' ) );
 		add_action( 'admin_post_utf8dc_download', array( __CLASS__, 'handle_download' ) );
 		add_action( 'admin_post_utf8dc_charset', array( __CLASS__, 'handle_charset' ) );
 		add_action( 'admin_post_utf8dc_engine', array( __CLASS__, 'handle_engine' ) );
+		add_action( 'admin_post_utf8dc_log', array( __CLASS__, 'handle_log_download' ) );
 		add_action( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
+		register_activation_hook( __FILE__, array( __CLASS__, 'activate' ) );
 		register_deactivation_hook( __FILE__, array( __CLASS__, 'deactivate' ) );
+	}
+
+	/** Records the activation time so the reminder notice can fire 30 minutes later. */
+	public static function activate(): void {
+		update_option( self::OPTION_ACTIVATED, time(), false );
+	}
+
+	/**
+	 * Admin-area reminder (never runs on the front end): if the plugin has been
+	 * active for more than 30 minutes, nudge the admin to deactivate and delete it.
+	 */
+	public static function reminder_notice(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$activated = (int) get_option( self::OPTION_ACTIVATED, 0 );
+		if ( ! $activated || ( time() - $activated ) < self::REMINDER_DELAY ) {
+			return;
+		}
+
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		if ( $screen && false !== strpos( (string) $screen->id, self::MENU_SLUG ) ) {
+			return; // The plugin's own page already shows removal reminders.
+		}
+
+		echo '<div class="notice notice-warning"><p>';
+		printf(
+			/* translators: %s: URL of the Plugins screen */
+			wp_kses_post( __( '<strong>UTF-8 Database Converter</strong> is still installed and activated. It is a one-off tool — once your conversion is done, please <a href="%s">deactivate and delete it</a>.', 'utf8-database-converter' ) ),
+			esc_url( admin_url( 'plugins.php' ) )
+		);
+		echo '</p></div>';
 	}
 
 	public static function register_menu(): void {
@@ -76,7 +116,9 @@ final class UTF8_Database_Converter {
 	}
 
 	public static function deactivate(): void {
+		self::log( 'Plugin deactivated — deleting backup archives and the debug log.' );
 		self::cleanup_backups();
+		delete_option( self::OPTION_ACTIVATED );
 	}
 
 	/* --------------------------------------------------------------------- *
@@ -86,14 +128,14 @@ final class UTF8_Database_Converter {
 	/**
 	 * Returns metadata for every table in the WordPress database.
 	 *
-	 * @return array<int, array{name:string, engine:string, collation:string}>
+	 * @return array<int, array{name:string, engine:string, collation:string, type:string}>
 	 */
 	private static function tables_info(): array {
 		global $wpdb;
 
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				'SELECT TABLE_NAME AS name, ENGINE AS engine, TABLE_COLLATION AS collation
+				'SELECT TABLE_NAME AS name, ENGINE AS engine, TABLE_COLLATION AS collation, TABLE_TYPE AS type
 				 FROM information_schema.TABLES
 				 WHERE TABLE_SCHEMA = %s
 				 ORDER BY TABLE_NAME',
@@ -108,6 +150,22 @@ final class UTF8_Database_Converter {
 	/** Quotes an SQL identifier (table/column name) with backticks. */
 	private static function quote_identifier( string $identifier ): string {
 		return '`' . str_replace( '`', '``', $identifier ) . '`';
+	}
+
+	/**
+	 * Classifies a table collation:
+	 * - 'good':   already utf8mb4_unicode_ci — the target, nothing to do.
+	 * - 'ok':     utf8mb4 with a different collation (e.g. utf8mb4_unicode_520_ci) — fine, optionally convertible.
+	 * - 'legacy': anything else (utf8, latin1, …) — should be converted.
+	 */
+	private static function collation_state( string $collation ): string {
+		if ( self::TARGET_COLLATION === $collation ) {
+			return 'good';
+		}
+		if ( '' !== $collation && 0 === strpos( $collation, self::TARGET_CHARSET . '_' ) ) {
+			return 'ok';
+		}
+		return 'legacy';
 	}
 
 	/**
@@ -181,12 +239,72 @@ final class UTF8_Database_Converter {
 
 	private static function cleanup_backups(): void {
 		$dir = self::backup_dir();
-		foreach ( glob( $dir . '*.zip' ) ?: array() as $file ) {
+		foreach ( glob( $dir . '*.{zip,sql,log}', GLOB_BRACE ) ?: array() as $file ) {
 			if ( is_file( $file ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 				@unlink( $file );
 			}
 		}
+	}
+
+	/** Deletes leftover backup archives whose download window has expired. */
+	private static function sweep_expired_backups(): void {
+		$dir = self::backup_dir();
+		foreach ( glob( $dir . '*.zip' ) ?: array() as $file ) {
+			$mtime = is_file( $file ) ? filemtime( $file ) : false;
+			if ( $mtime && $mtime < time() - self::BACKUP_TTL ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+				@unlink( $file );
+			}
+		}
+	}
+
+	/* --------------------------------------------------------------------- *
+	 * Debug log
+	 * --------------------------------------------------------------------- */
+
+	private static function log_path(): string {
+		return self::backup_dir() . self::LOG_FILE;
+	}
+
+	/** Appends one timestamped line to the debug log (never throws). */
+	private static function log( string $message ): void {
+		$line = gmdate( 'Y-m-d H:i:s' ) . ' UTC [user ' . get_current_user_id() . '] ' . $message . "\n";
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		@file_put_contents( self::log_path(), $line, FILE_APPEND | LOCK_EX );
+	}
+
+	/** Logs environment details at the start of every operation. */
+	private static function log_environment( string $operation ): void {
+		global $wpdb, $wp_version;
+		self::log( sprintf(
+			'--- %s started (WordPress %s, PHP %s, MySQL/MariaDB %s, memory_limit %s, max_execution_time %s) ---',
+			$operation,
+			$wp_version,
+			PHP_VERSION,
+			$wpdb->get_var( 'SELECT VERSION()' ), // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			(string) ini_get( 'memory_limit' ),
+			(string) ini_get( 'max_execution_time' )
+		) );
+	}
+
+	/** admin-post handler: download the debug log as a text file. */
+	public static function handle_log_download(): void {
+		self::require_capability();
+		check_admin_referer( self::NONCE_LOG );
+
+		$path = self::log_path();
+		if ( ! is_file( $path ) ) {
+			wp_die( esc_html__( 'No debug log exists yet. Run a backup or conversion first.', 'utf8-database-converter' ), '', array( 'response' => 404 ) );
+		}
+
+		nocache_headers();
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename="utf8dc-debug.log"' );
+		header( 'Content-Length: ' . filesize( $path ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readfile
+		readfile( $path );
+		exit;
 	}
 
 	/**
@@ -259,43 +377,57 @@ final class UTF8_Database_Converter {
 		self::require_capability();
 		check_admin_referer( self::NONCE_BACKUP );
 		self::raise_limits();
+		self::log_environment( 'Backup' );
 
-		if ( ! class_exists( 'ZipArchive' ) ) {
-			wp_die( esc_html__( 'The PHP Zip extension (ZipArchive) is required to create compressed backups. Please ask your host to enable it.', 'utf8-database-converter' ) );
-		}
+		try {
+			if ( ! class_exists( 'ZipArchive' ) ) {
+				self::log( 'Backup aborted: the PHP Zip extension (ZipArchive) is not available.' );
+				wp_die( esc_html__( 'The PHP Zip extension (ZipArchive) is required to create compressed backups. Please ask your host to enable it.', 'utf8-database-converter' ) );
+			}
 
-		$sql_path = self::write_sql_dump();
-		if ( is_wp_error( $sql_path ) ) {
-			wp_die( esc_html( $sql_path->get_error_message() ) );
-		}
+			self::sweep_expired_backups();
 
-		$zip_name = sanitize_file_name( DB_NAME ) . '.sql.zip';
-		$zip_path = self::backup_dir() . wp_generate_password( 20, false, false ) . '-' . $zip_name;
+			self::log( 'Writing SQL dump to a temporary file…' );
+			$sql_path = self::write_sql_dump();
+			if ( is_wp_error( $sql_path ) ) {
+				self::log( 'Backup failed: ' . $sql_path->get_error_message() );
+				wp_die( esc_html( $sql_path->get_error_message() ) );
+			}
+			self::log( 'SQL dump written (' . size_format( (float) filesize( $sql_path ) ) . '). Compressing…' );
 
-		$zip    = new ZipArchive();
-		$opened = $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
-		if ( true !== $opened ) {
+			$zip_name = sanitize_file_name( DB_NAME ) . '.sql.zip';
+			$zip_path = self::backup_dir() . wp_generate_password( 20, false, false ) . '-' . $zip_name;
+
+			$zip    = new ZipArchive();
+			$opened = $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+			if ( true !== $opened ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+				@unlink( $sql_path );
+				self::log( 'Backup failed: could not create the ZIP archive (ZipArchive::open returned ' . $opened . ').' );
+				wp_die( esc_html__( 'Could not create the ZIP archive in wp-content/utf8dc-backups/. Please check directory permissions.', 'utf8-database-converter' ) );
+			}
+			$zip->addFile( $sql_path, sanitize_file_name( DB_NAME ) . '.sql' );
+			$zip->close();
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 			@unlink( $sql_path );
-			wp_die( esc_html__( 'Could not create the ZIP archive in wp-content/utf8dc-backups/. Please check directory permissions.', 'utf8-database-converter' ) );
+			self::log( 'Backup archive created (' . size_format( (float) filesize( $zip_path ) ) . '); starting download.' );
+
+			set_transient( self::download_key(), $zip_path, self::BACKUP_TTL );
+
+			wp_safe_redirect(
+				add_query_arg(
+					array(
+						'action'   => 'utf8dc_download',
+						'_wpnonce' => wp_create_nonce( self::NONCE_DOWNLOAD ),
+					),
+					admin_url( 'admin-post.php' )
+				)
+			);
+			exit;
+		} catch ( Throwable $e ) {
+			self::log( 'FATAL during backup: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine() );
+			wp_die( esc_html__( 'The backup failed with a fatal error. Download the debug log from the plugin page for details — nothing after the last log line was completed.', 'utf8-database-converter' ) );
 		}
-		$zip->addFile( $sql_path, sanitize_file_name( DB_NAME ) . '.sql' );
-		$zip->close();
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
-		@unlink( $sql_path );
-
-		set_transient( self::download_key(), $zip_path, self::BACKUP_TTL );
-
-		wp_safe_redirect(
-			add_query_arg(
-				array(
-					'action'   => 'utf8dc_download',
-					'_wpnonce' => wp_create_nonce( self::NONCE_DOWNLOAD ),
-				),
-				admin_url( 'admin-post.php' )
-			)
-		);
-		exit;
 	}
 
 	private static function download_key(): string {
@@ -330,6 +462,7 @@ final class UTF8_Database_Converter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 		@unlink( $path );
 		delete_transient( self::download_key() );
+		self::log( 'Backup archive downloaded by the browser and deleted from the server.' );
 		exit;
 	}
 
@@ -345,8 +478,8 @@ final class UTF8_Database_Converter {
 	 */
 	private static function convert_charset( array $tables ): array {
 		global $wpdb;
-		$results = array();
 
+		$results = array();
 		foreach ( $tables as $table ) {
 			$sql = sprintf(
 				'ALTER TABLE %s CONVERT TO CHARACTER SET %s COLLATE %s',
@@ -354,12 +487,15 @@ final class UTF8_Database_Converter {
 				self::TARGET_CHARSET,
 				self::TARGET_COLLATION
 			);
+			self::log( "Running: {$sql}" );
 			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 			$ok        = false !== $wpdb->query( $sql );
+			$message   = $ok ? '' : $wpdb->last_error;
+			self::log( $ok ? "OK: {$table} converted to " . self::TARGET_CHARSET : "FAILED: {$table} — {$message}" );
 			$results[] = array(
 				'table'   => $table,
 				'ok'      => $ok,
-				'message' => $ok ? '' : $wpdb->last_error,
+				'message' => $message,
 			);
 		}
 		return $results;
@@ -385,13 +521,16 @@ final class UTF8_Database_Converter {
 			if ( ! in_array( $table, $myisam, true ) ) {
 				continue; // Only actual MyISAM tables may be converted.
 			}
-			$sql       = 'ALTER TABLE ' . self::quote_identifier( $table ) . ' ENGINE=' . self::TARGET_ENGINE;
+			$sql = 'ALTER TABLE ' . self::quote_identifier( $table ) . ' ENGINE=' . self::TARGET_ENGINE;
+			self::log( "Running: {$sql}" );
 			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 			$ok        = false !== $wpdb->query( $sql );
+			$message   = $ok ? '' : $wpdb->last_error;
+			self::log( $ok ? "OK: {$table} converted to " . self::TARGET_ENGINE : "FAILED: {$table} — {$message}" );
 			$results[] = array(
 				'table'   => $table,
 				'ok'      => $ok,
-				'message' => $ok ? '' : $wpdb->last_error,
+				'message' => $message,
 			);
 		}
 		return $results;
@@ -401,26 +540,42 @@ final class UTF8_Database_Converter {
 		self::require_capability();
 		check_admin_referer( self::NONCE_CHARSET );
 		self::raise_limits();
+		self::log_environment( 'Character set conversion' );
 
-		$tables  = isset( $_POST['utf8dc_tables'] ) ? self::validate_selected_tables( $_POST['utf8dc_tables'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
-		$results = empty( $tables ) ? array() : self::convert_charset( $tables );
+		try {
+			$tables  = isset( $_POST['utf8dc_tables'] ) ? self::validate_selected_tables( $_POST['utf8dc_tables'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			self::log( 'Tables selected for character set conversion: ' . ( $tables ? implode( ', ', $tables ) : '(none)' ) );
+			$results = empty( $tables ) ? array() : self::convert_charset( $tables );
+			self::log( 'Character set conversion finished: ' . count( array_filter( $results, fn( $r ) => $r['ok'] ) ) . ' succeeded, ' . count( array_filter( $results, fn( $r ) => ! $r['ok'] ) ) . ' failed.' );
 
-		set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
-		wp_safe_redirect( add_query_arg( 'utf8dc_done', 'charset', self::page_url() ) );
-		exit;
+			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
+			wp_safe_redirect( add_query_arg( 'utf8dc_done', 'charset', self::page_url() ) );
+			exit;
+		} catch ( Throwable $e ) {
+			self::log( 'FATAL during character set conversion: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine() );
+			wp_die( esc_html__( 'The conversion failed with a fatal error. Download the debug log from the plugin page — every table listed after the last "OK:" line was NOT converted.', 'utf8-database-converter' ) );
+		}
 	}
 
 	public static function handle_engine(): void {
 		self::require_capability();
 		check_admin_referer( self::NONCE_ENGINE );
 		self::raise_limits();
+		self::log_environment( 'Engine conversion' );
 
-		$tables  = isset( $_POST['utf8dc_tables'] ) ? self::validate_selected_tables( $_POST['utf8dc_tables'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
-		$results = empty( $tables ) ? array() : self::convert_engine( $tables );
+		try {
+			$tables  = isset( $_POST['utf8dc_tables'] ) ? self::validate_selected_tables( $_POST['utf8dc_tables'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			self::log( 'Tables selected for engine conversion: ' . ( $tables ? implode( ', ', $tables ) : '(none)' ) );
+			$results = empty( $tables ) ? array() : self::convert_engine( $tables );
+			self::log( 'Engine conversion finished: ' . count( array_filter( $results, fn( $r ) => $r['ok'] ) ) . ' succeeded, ' . count( array_filter( $results, fn( $r ) => ! $r['ok'] ) ) . ' failed.' );
 
-		set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'engine', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
-		wp_safe_redirect( add_query_arg( 'utf8dc_done', 'engine', self::page_url() ) );
-		exit;
+			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'engine', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
+			wp_safe_redirect( add_query_arg( 'utf8dc_done', 'engine', self::page_url() ) );
+			exit;
+		} catch ( Throwable $e ) {
+			self::log( 'FATAL during engine conversion: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine() );
+			wp_die( esc_html__( 'The conversion failed with a fatal error. Download the debug log from the plugin page — every table listed after the last "OK:" line was NOT converted.', 'utf8-database-converter' ) );
+		}
 	}
 
 	/* --------------------------------------------------------------------- *
@@ -458,16 +613,19 @@ final class UTF8_Database_Converter {
 
 	public static function render_page(): void {
 		self::require_capability();
+		self::sweep_expired_backups();
 
 		$flash = get_transient( 'utf8dc_results_' . get_current_user_id() );
 		if ( is_array( $flash ) ) {
 			delete_transient( 'utf8dc_results_' . get_current_user_id() );
 		}
 
-		$tables  = self::tables_info();
-		$myisam  = array_filter( $tables, fn( $t ) => 'myisam' === strtolower( (string) $t['engine'] ) );
-		$legacy  = array_filter( $tables, fn( $t ) => '' !== (string) $t['collation'] && 0 !== strpos( (string) $t['collation'], self::TARGET_CHARSET ) );
-		$all_done = empty( $myisam ) && empty( $legacy );
+		$tables    = self::tables_info();
+		$base      = array_filter( $tables, fn( $t ) => 'BASE TABLE' === strtoupper( (string) ( $t['type'] ?? 'BASE TABLE' ) ) );
+		$myisam    = array_filter( $base, fn( $t ) => 'myisam' === strtolower( (string) $t['engine'] ) );
+		$pending   = array_filter( $base, fn( $t ) => 'good' !== self::collation_state( (string) $t['collation'] ) );
+		$all_done  = empty( $myisam ) && empty( $pending );
+		$log_exists = is_file( self::log_path() );
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'UTF-8 Database Converter', 'utf8-database-converter' ); ?></h1>
@@ -491,11 +649,11 @@ final class UTF8_Database_Converter {
 
 			<div class="notice notice-error" style="padding:.8em;">
 				<p style="font-weight:bold;margin:0;">
-					<?php esc_html_e( 'WARNING: schema changes can lose data if interrupted. Back up your database first (Step 1), and consider putting the site in maintenance mode while converting.', 'utf8-database-converter' ); ?>
+					<?php esc_html_e( 'WARNING: schema changes can lose data if interrupted. Back up your database first (Section 1), and consider putting the site in maintenance mode while converting.', 'utf8-database-converter' ); ?>
 				</p>
 			</div>
 
-			<h2><?php esc_html_e( 'Step 1 — Back up the entire database', 'utf8-database-converter' ); ?></h2>
+			<h2><?php esc_html_e( 'Section 1 — Back up the entire database', 'utf8-database-converter' ); ?></h2>
 			<p><?php
 				printf(
 					/* translators: %s: backup file name, e.g. wordpress.sql.zip */
@@ -512,61 +670,8 @@ final class UTF8_Database_Converter {
 			<hr />
 
 			<h2><?php
-				/* translators: %s: target character set, e.g. utf8mb4 */
-				printf( esc_html__( 'Step 2 — Convert tables to %s', 'utf8-database-converter' ), esc_html( self::TARGET_CHARSET ) );
-			?></h2>
-			<?php if ( empty( $tables ) ) : ?>
-				<p><?php esc_html_e( 'No tables were found in this database.', 'utf8-database-converter' ); ?></p>
-			<?php else : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-					<input type="hidden" name="action" value="utf8dc_charset" />
-					<?php wp_nonce_field( self::NONCE_CHARSET ); ?>
-					<p>
-						<a href="#" id="utf8dc-charset-all"><?php esc_html_e( 'Select all', 'utf8-database-converter' ); ?></a> |
-						<a href="#" id="utf8dc-charset-none"><?php esc_html_e( 'Select none', 'utf8-database-converter' ); ?></a> |
-						<a href="#" id="utf8dc-charset-legacy"><?php esc_html_e( 'Select only non-utf8mb4 tables', 'utf8-database-converter' ); ?></a>
-					</p>
-					<table class="widefat striped" style="max-width:900px;">
-						<thead>
-							<tr>
-								<th style="width:2.2em;"></th>
-								<th><?php esc_html_e( 'Table', 'utf8-database-converter' ); ?></th>
-								<th><?php esc_html_e( 'Engine', 'utf8-database-converter' ); ?></th>
-								<th><?php esc_html_e( 'Current collation', 'utf8-database-converter' ); ?></th>
-							</tr>
-						</thead>
-						<tbody>
-							<?php foreach ( $tables as $t ) :
-								$is_utf8mb4 = 0 === strpos( (string) $t['collation'], self::TARGET_CHARSET );
-								?>
-								<tr>
-									<td><input type="checkbox" class="utf8dc-charset-cb" name="utf8dc_tables[]" value="<?php echo esc_attr( $t['name'] ); ?>" <?php checked( true ); ?> data-legacy="<?php echo $is_utf8mb4 ? '0' : '1'; ?>" /></td>
-									<td><code><?php echo esc_html( $t['name'] ); ?></code></td>
-									<td><?php echo esc_html( (string) $t['engine'] ); ?></td>
-									<td><?php echo esc_html( (string) $t['collation'] ); ?><?php echo $is_utf8mb4 ? ' ✅' : ''; ?></td>
-								</tr>
-							<?php endforeach; ?>
-						</tbody>
-					</table>
-					<p style="max-width:900px;">
-						<?php
-						printf(
-							/* translators: 1: target character set, 2: target collation */
-							esc_html__( 'Selected tables (and all their text columns) will be converted to %1$s with the %2$s collation using ALTER TABLE … CONVERT TO CHARACTER SET.', 'utf8-database-converter' ),
-							'<code>' . esc_html( self::TARGET_CHARSET ) . '</code>',
-							'<code>' . esc_html( self::TARGET_COLLATION ) . '</code>'
-						);
-						?>
-					</p>
-					<?php submit_button( __( 'Convert selected tables to utf8mb4', 'utf8-database-converter' ), 'primary', 'submit', false ); ?>
-				</form>
-			<?php endif; ?>
-
-			<hr />
-
-			<h2><?php
 				/* translators: %s: target storage engine, e.g. InnoDB */
-				printf( esc_html__( 'Step 3 — Convert MyISAM tables to %s', 'utf8-database-converter' ), esc_html( self::TARGET_ENGINE ) );
+				printf( esc_html__( 'Section 2 — Convert MyISAM tables to %s', 'utf8-database-converter' ), esc_html( self::TARGET_ENGINE ) );
 			?></h2>
 			<?php if ( empty( $myisam ) ) : ?>
 				<p><?php
@@ -599,17 +704,108 @@ final class UTF8_Database_Converter {
 							<?php endforeach; ?>
 						</tbody>
 					</table>
+					<p style="max-width:900px;">
+						<?php
+						printf(
+							/* translators: %s: target storage engine, e.g. InnoDB */
+							esc_html__( 'Selected tables will be converted with ALTER TABLE … ENGINE=%s.', 'utf8-database-converter' ),
+							'<code>' . esc_html( self::TARGET_ENGINE ) . '</code>'
+						);
+						?>
+					</p>
 					<?php submit_button( __( 'Convert selected tables to InnoDB', 'utf8-database-converter' ), 'primary', 'submit', false ); ?>
 				</form>
 			<?php endif; ?>
 
 			<hr />
 
-			<h2><?php esc_html_e( 'Step 4 — Remove this plugin', 'utf8-database-converter' ); ?></h2>
+			<h2><?php
+				/* translators: %s: target character set, e.g. utf8mb4 */
+				printf( esc_html__( 'Section 3 — Convert non-UTF-8 tables to %s', 'utf8-database-converter' ), esc_html( self::TARGET_CHARSET ) );
+			?></h2>
+			<?php if ( empty( $base ) ) : ?>
+				<p><?php esc_html_e( 'No tables were found in this database.', 'utf8-database-converter' ); ?></p>
+			<?php else : ?>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="utf8dc_charset" />
+					<?php wp_nonce_field( self::NONCE_CHARSET ); ?>
+					<p>
+						<a href="#" id="utf8dc-charset-all"><?php esc_html_e( 'Select all', 'utf8-database-converter' ); ?></a> |
+						<a href="#" id="utf8dc-charset-none"><?php esc_html_e( 'Select none', 'utf8-database-converter' ); ?></a> |
+						<a href="#" id="utf8dc-charset-legacy"><?php esc_html_e( 'Select only tables needing conversion', 'utf8-database-converter' ); ?></a>
+					</p>
+					<table class="widefat striped" style="max-width:900px;">
+						<thead>
+							<tr>
+								<th style="width:2.2em;"></th>
+								<th><?php esc_html_e( 'Table', 'utf8-database-converter' ); ?></th>
+								<th><?php esc_html_e( 'Engine', 'utf8-database-converter' ); ?></th>
+								<th><?php esc_html_e( 'Current collation', 'utf8-database-converter' ); ?></th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php foreach ( $base as $t ) :
+								$state   = self::collation_state( (string) $t['collation'] );
+								$checked = 'good' !== $state;
+								?>
+								<tr>
+									<td><input type="checkbox" class="utf8dc-charset-cb" name="utf8dc_tables[]" value="<?php echo esc_attr( $t['name'] ); ?>" <?php checked( $checked ); ?> data-legacy="<?php echo $checked ? '1' : '0'; ?>" /></td>
+									<td><code><?php echo esc_html( $t['name'] ); ?></code></td>
+									<td><?php echo esc_html( (string) $t['engine'] ); ?></td>
+									<td>
+										<?php echo esc_html( (string) $t['collation'] ); ?>
+										<?php if ( 'good' === $state ) : ?>
+											<span style="color:#46b450;" title="<?php esc_attr_e( 'Already utf8mb4_unicode_ci — this is the target, nothing to do.', 'utf8-database-converter' ); ?>">✅</span>
+										<?php elseif ( 'ok' === $state ) : ?>
+											<span style="color:#ffb900;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4, just a different collation — fine as-is, but can be converted to utf8mb4_unicode_ci.', 'utf8-database-converter' ); ?>">✔</span>
+										<?php endif; ?>
+									</td>
+								</tr>
+							<?php endforeach; ?>
+						</tbody>
+					</table>
+					<p style="max-width:900px;">
+						<span style="color:#46b450;">✅</span> <?php esc_html_e( 'already utf8mb4_unicode_ci (left unselected)', 'utf8-database-converter' ); ?> ·
+						<span style="color:#ffb900;font-weight:bold;">✔</span> <?php esc_html_e( 'utf8mb4 with another collation — fine, optionally convertible (pre-selected)', 'utf8-database-converter' ); ?> ·
+						<?php esc_html_e( 'no mark: non-utf8mb4 (pre-selected)', 'utf8-database-converter' ); ?>
+					</p>
+					<p style="max-width:900px;">
+						<?php
+						printf(
+							/* translators: 1: target character set, 2: target collation */
+							esc_html__( 'Selected tables (and all their text columns) will be converted to %1$s with the %2$s collation using ALTER TABLE … CONVERT TO CHARACTER SET.', 'utf8-database-converter' ),
+							'<code>' . esc_html( self::TARGET_CHARSET ) . '</code>',
+							'<code>' . esc_html( self::TARGET_COLLATION ) . '</code>'
+						);
+						?>
+					</p>
+					<?php submit_button( __( 'Convert selected tables to utf8mb4', 'utf8-database-converter' ), 'primary', 'submit', false ); ?>
+				</form>
+			<?php endif; ?>
+
+			<hr />
+
+			<h2><?php esc_html_e( 'Debug log', 'utf8-database-converter' ); ?></h2>
+			<p><?php
+				printf(
+					/* translators: %s: server path of the debug log */
+					esc_html__( 'Every backup and conversion step is written to %s, so after a failure you can see exactly which tables were and were not converted. The log is deleted when the plugin is deactivated.', 'utf8-database-converter' ),
+					'<code>' . esc_html( self::log_path() ) . '</code>'
+				);
+			?></p>
+			<?php if ( $log_exists ) : ?>
+				<p><a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=utf8dc_log' ), self::NONCE_LOG ) ); ?>"><?php esc_html_e( 'Download debug log', 'utf8-database-converter' ); ?></a></p>
+			<?php else : ?>
+				<p><em><?php esc_html_e( 'No log entries yet — run a backup or conversion first.', 'utf8-database-converter' ); ?></em></p>
+			<?php endif; ?>
+
+			<hr />
+
+			<h2><?php esc_html_e( 'Remove this plugin', 'utf8-database-converter' ); ?></h2>
 			<p><?php
 				printf(
 					/* translators: %s: URL of the Plugins screen */
-					wp_kses_post( __( 'Once your conversions are complete and you have verified your site works correctly, this plugin has served its purpose. Please <a href="%s">deactivate and delete it</a> — leaving unused administrative tools installed is a security risk.', 'utf8-database-converter' ) ),
+					wp_kses_post( __( 'Once your conversions are complete and you have verified your site works correctly, this plugin has served its purpose. Please <a href="%s">deactivate and delete it</a> — leaving unused administrative tools installed is a security risk. Deactivation also deletes any leftover backup archives and the debug log.', 'utf8-database-converter' ) ),
 					esc_url( admin_url( 'plugins.php' ) )
 				);
 			?></p>
