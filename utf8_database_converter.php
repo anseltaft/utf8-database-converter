@@ -2,11 +2,11 @@
 /**
  * Plugin Name:       UTF-8 Database Converter
  * Description:       Backs up your database (as a compressed SQL file), converts tables and columns to utf8mb4, and converts MyISAM tables to InnoDB. Remove this plugin when finished.
- * Version:           2.1.0
+ * Version:           1.0.1
  * Requires at least: 5.0
  * Requires PHP:      7.4
- * Author:            Yihui Xie (original), modernized for PHP 7.4–8.5
- * Author URI:        https://yihui.org/
+ * Author:            Ansel Taft
+ * Author URI:        https://anseltaft.com/
  * License:           GPL-3.0-only
  * License URI:       https://www.gnu.org/licenses/gpl-3.0.html
  * Text Domain:       utf8-database-converter
