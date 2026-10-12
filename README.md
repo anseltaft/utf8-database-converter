@@ -3,7 +3,7 @@
 A WordPress plugin that modernizes legacy database schemas:
 
 1. **Backs up your entire database** and downloads it as a compressed `databasename.sql.zip` file.
-2. **Converts tables and their text columns to `utf8mb4`** (`utf8mb4_unicode_ci` collation) — the current, recommended UTF-8 character set for MySQL/MariaDB and WordPress — with per-table selection (all tables selected by default).
+2. **Converts tables and their text columns to `utf8mb4`** (`utf8mb4_unicode_ci` or `utf8mb4_unicode_520_ci` collation, your choice) — the current, recommended UTF-8 character set for MySQL/MariaDB and WordPress — with per-table selection.
 3. **Converts MyISAM tables to InnoDB**, with per-table selection (all MyISAM tables selected by default).
 4. **Reminds you to remove the plugin** once conversions are complete — with an on-screen reminder, plus an admin-area-only warning notice on every wp-admin page if the plugin is still active 30 minutes after activation.
 
@@ -32,7 +32,7 @@ Find the plugin under **Tools → UTF-8 DB Converter**. The admin screen is divi
 
 ### Section 1 — Back up the entire database
 
-Click **Back up & download now**. The plugin generates a full SQL dump (structure + data for every table), compresses it into `databasename.sql.zip`, and streams it to your browser. The temporary copy on the server is deleted immediately after download (and after 10 minutes the download link expires). Any leftover archives are also deleted when the plugin is deactivated.
+Click **Back up & download now**. The plugin generates a full SQL dump (structure + data for every table), compresses it into `databasename.sql.zip`, and streams it to your browser. The temporary copy on the server is deleted immediately after download (and after 10 minutes the download link expires). Any leftover archives are also deleted when the plugin is deactivated. If any table could not be read completely during the dump, a `WARNING` line naming that table is written to the debug log — check it before trusting the backup.
 
 > **Do not skip this step.** `ALTER TABLE` operations can lose data if interrupted.
 
@@ -48,14 +48,19 @@ ALTER TABLE `table_name` ENGINE=InnoDB;
 
 Every table is listed with its engine and current collation:
 
-- ✔ (green) `utf8mb4_unicode_ci` — the target, left **unselected** (nothing to do).
-- ✔ (yellow) other `utf8mb4` collations such as `utf8mb4_unicode_520_ci` — fine as-is, but can be converted to `utf8mb4_unicode_ci`; pre-selected.
+- ✔ (green) `utf8mb4_unicode_ci` or `utf8mb4_unicode_520_ci` — accepted targets, left **unselected** (nothing to do).
+- ✔ (yellow) other `utf8mb4` collations such as `utf8mb4_general_ci` — fine as-is, but can be converted; pre-selected.
 - No mark — any non-`utf8mb4` charset/collation; pre-selected.
 
-Use the checkboxes (or the *Select all / Select none / Select only tables needing conversion* links) to adjust, then click **Convert selected tables to utf8mb4**. Each selected table is converted with:
+Use the checkboxes (or the *Select all / Select none / Select only tables needing conversion* links) to adjust the selection, then choose the target collation:
+
+- `utf8mb4_unicode_ci`: a faster collation based on UCA 4.0.0, trading some linguistic accuracy for speed.
+- `utf8mb4_unicode_520_ci`: a more linguistically accurate collation based on UCA 5.2.0, trading speed for correctness.
+
+The **Convert selected tables to …** button label reflects the chosen collation. Each selected table is converted with:
 
 ```sql
-ALTER TABLE `table_name` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `table_name` CONVERT TO CHARACTER SET utf8mb4 COLLATE <chosen collation>;
 ```
 
 This updates the table default **and** every `CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET` column in one statement. Results (success or the MySQL error) are shown per table.
@@ -73,7 +78,9 @@ Once all tables show `utf8mb4` collations and no MyISAM tables remain, **deactiv
 - All actions require the `manage_options` capability and WordPress nonces.
 - Table names are validated server-side against the real tables in the database; identifiers are backtick-escaped before reaching SQL.
 - All output is escaped (`esc_html`, `esc_attr`, `esc_url`).
-- Backup files and the debug log are written to `wp-content/utf8dc-backups/` with `.htaccess` denial and an `index.php` guard, use random unguessable file names, expire after 10 minutes (expired archives are swept automatically), and are deleted after streaming.
+- Backup files and the debug log are written to `wp-content/utf8dc-backups/` with `.htaccess` denial and an `index.php` guard, use random unguessable file names, expire after 10 minutes (expired archives are swept automatically), and are deleted after streaming. On non-Apache servers (e.g. Nginx) `.htaccess` is ignored — the random file names and short lifetime are the protection there, so download promptly and deactivate when done.
+- Downloads flush output buffers before streaming so stray warnings cannot corrupt the archive.
+- The collation selector is validated against a fixed whitelist (`utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`) before reaching SQL.
 - The plugin performs no front-end activity whatsoever.
 
 ## Limitations

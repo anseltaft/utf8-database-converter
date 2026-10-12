@@ -1,7 +1,6 @@
 <?php
 /**
  * Plugin Name:       UTF-8 Database Converter
- * Plugin URI:        https://github.com/your-username/utf8-database-converter
  * Description:       Backs up your database (as a compressed SQL file), converts tables and columns to utf8mb4, and converts MyISAM tables to InnoDB. Remove this plugin when finished.
  * Version:           2.1.0
  * Requires at least: 5.0
@@ -47,6 +46,7 @@ final class UTF8_Database_Converter {
 	const LOG_FILE         = 'debug.log';
 	const TARGET_CHARSET   = 'utf8mb4';
 	const TARGET_COLLATION = 'utf8mb4_unicode_ci';
+	const COLLATION_CHOICES = array( 'utf8mb4_unicode_ci', 'utf8mb4_unicode_520_ci' );
 	const TARGET_ENGINE    = 'InnoDB';
 	const BACKUP_TTL       = 600; // 10 minutes.
 	const REMINDER_DELAY   = 1800; // 30 minutes.
@@ -154,12 +154,12 @@ final class UTF8_Database_Converter {
 
 	/**
 	 * Classifies a table collation:
-	 * - 'good':   already utf8mb4_unicode_ci — the target, nothing to do.
-	 * - 'ok':     utf8mb4 with a different collation (e.g. utf8mb4_unicode_520_ci) — fine, optionally convertible.
+	 * - 'good':   already utf8mb4_unicode_ci or utf8mb4_unicode_520_ci — an accepted target, nothing to do.
+	 * - 'ok':     utf8mb4 with a different collation (e.g. utf8mb4_general_ci) — fine, optionally convertible.
 	 * - 'legacy': anything else (utf8, latin1, …) — should be converted.
 	 */
 	private static function collation_state( string $collation ): string {
-		if ( self::TARGET_COLLATION === $collation ) {
+		if ( in_array( $collation, self::COLLATION_CHOICES, true ) ) {
 			return 'good';
 		}
 		if ( '' !== $collation && 0 === strpos( $collation, self::TARGET_CHARSET . '_' ) ) {
@@ -288,6 +288,12 @@ final class UTF8_Database_Converter {
 		) );
 	}
 
+	/** Clears any open output buffers so streamed downloads are not corrupted. */
+	private static function clean_output_buffers(): void {
+		while ( ob_get_level() > 0 && ob_end_clean() ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+	}
+
 	/** admin-post handler: download the debug log as a text file. */
 	public static function handle_log_download(): void {
 		self::require_capability();
@@ -298,6 +304,7 @@ final class UTF8_Database_Converter {
 			wp_die( esc_html__( 'No debug log exists yet. Run a backup or conversion first.', 'utf8-database-converter' ), '', array( 'response' => 404 ) );
 		}
 
+		self::clean_output_buffers();
 		nocache_headers();
 		header( 'Content-Type: text/plain; charset=utf-8' );
 		header( 'Content-Disposition: attachment; filename="utf8dc-debug.log"' );
@@ -334,6 +341,8 @@ final class UTF8_Database_Converter {
 		$header .= "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n\n";
 		fwrite( $fh, $header );
 
+		$dumped  = 0;
+		$skipped = 0;
 		foreach ( self::tables_info() as $info ) {
 			$table  = $info['name'];
 			$quoted = self::quote_identifier( $table );
@@ -342,6 +351,9 @@ final class UTF8_Database_Converter {
 			if ( is_array( $create ) && isset( $create[1] ) ) {
 				fwrite( $fh, "\n\n-- --------------------------------------------------------\n-- Structure for table {$quoted}\n-- --------------------------------------------------------\n\n" );
 				fwrite( $fh, "DROP TABLE IF EXISTS {$quoted};\n" . $create[1] . ";\n" );
+			} else {
+				$skipped++;
+				self::log( "WARNING: could not read the structure of {$table} ({$wpdb->last_error}) — it is missing from this backup." );
 			}
 
 			$offset = 0;
@@ -349,6 +361,8 @@ final class UTF8_Database_Converter {
 				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$rows = $wpdb->get_results( "SELECT * FROM {$quoted} LIMIT {$offset}, " . self::DUMP_CHUNK_ROWS, ARRAY_A );
 				if ( ! is_array( $rows ) ) {
+					$skipped++;
+					self::log( "WARNING: failed reading rows from {$table} at row {$offset} ({$wpdb->last_error}) — the backup of this table is INCOMPLETE." );
 					break;
 				}
 				foreach ( $rows as $row ) {
@@ -363,11 +377,14 @@ final class UTF8_Database_Converter {
 				}
 				$offset += self::DUMP_CHUNK_ROWS;
 			}
+			$dumped++;
 			fwrite( $fh, "\n" );
 		}
 
 		fwrite( $fh, "\nSET FOREIGN_KEY_CHECKS=1;\n" );
 		fclose( $fh );
+
+		self::log( sprintf( 'SQL dump covers %d tables; %d problem(s) encountered (see WARNING lines above, if any).', $dumped, $skipped ) );
 
 		return $tmp;
 	}
@@ -453,6 +470,7 @@ final class UTF8_Database_Converter {
 		}
 
 		self::raise_limits();
+		self::clean_output_buffers();
 		nocache_headers();
 		header( 'Content-Type: application/zip' );
 		header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( DB_NAME ) . '.sql.zip"' );
@@ -471,12 +489,13 @@ final class UTF8_Database_Converter {
 	 * --------------------------------------------------------------------- */
 
 	/**
-	 * Converts the given tables to utf8mb4.
+	 * Converts the given tables to utf8mb4 with the given collation.
 	 *
-	 * @param string[] $tables Validated table names.
+	 * @param string[] $tables    Validated table names.
+	 * @param string   $collation One of self::COLLATION_CHOICES.
 	 * @return array<int, array{table:string, ok:bool, message:string}>
 	 */
-	private static function convert_charset( array $tables ): array {
+	private static function convert_charset( array $tables, string $collation ): array {
 		global $wpdb;
 
 		$results = array();
@@ -485,13 +504,13 @@ final class UTF8_Database_Converter {
 				'ALTER TABLE %s CONVERT TO CHARACTER SET %s COLLATE %s',
 				self::quote_identifier( $table ),
 				self::TARGET_CHARSET,
-				self::TARGET_COLLATION
+				$collation
 			);
 			self::log( "Running: {$sql}" );
 			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 			$ok        = false !== $wpdb->query( $sql );
 			$message   = $ok ? '' : $wpdb->last_error;
-			self::log( $ok ? "OK: {$table} converted to " . self::TARGET_CHARSET : "FAILED: {$table} — {$message}" );
+			self::log( $ok ? "OK: {$table} converted to " . self::TARGET_CHARSET . ' / ' . $collation : "FAILED: {$table} — {$message}" );
 			$results[] = array(
 				'table'   => $table,
 				'ok'      => $ok,
@@ -543,12 +562,17 @@ final class UTF8_Database_Converter {
 		self::log_environment( 'Character set conversion' );
 
 		try {
+			$collation = isset( $_POST['utf8dc_collation'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['utf8dc_collation'] ) ) : '';
+			if ( ! in_array( $collation, self::COLLATION_CHOICES, true ) ) {
+				$collation = self::TARGET_COLLATION;
+			}
+			self::log( 'Chosen collation: ' . $collation );
 			$tables  = isset( $_POST['utf8dc_tables'] ) ? self::validate_selected_tables( $_POST['utf8dc_tables'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 			self::log( 'Tables selected for character set conversion: ' . ( $tables ? implode( ', ', $tables ) : '(none)' ) );
-			$results = empty( $tables ) ? array() : self::convert_charset( $tables );
+			$results = empty( $tables ) ? array() : self::convert_charset( $tables, $collation );
 			self::log( 'Character set conversion finished: ' . count( array_filter( $results, fn( $r ) => $r['ok'] ) ) . ' succeeded, ' . count( array_filter( $results, fn( $r ) => ! $r['ok'] ) ) . ' failed.' );
 
-			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
+			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'collation' => $collation, 'results' => $results ), MINUTE_IN_SECONDS * 5 );
 			wp_safe_redirect( add_query_arg( 'utf8dc_done', 'charset', self::page_url() ) );
 			exit;
 		} catch ( Throwable $e ) {
@@ -593,8 +617,8 @@ final class UTF8_Database_Converter {
 		$errors = array_filter( $results, fn( $r ) => ! $r['ok'] );
 		$class  = empty( $errors ) ? 'notice-success' : 'notice-error';
 		$title  = 'charset' === ( $data['type'] ?? '' )
-			/* translators: %s: target character set, e.g. utf8mb4 */
-			? sprintf( __( 'Character set conversion results (target: %s)', 'utf8-database-converter' ), self::TARGET_CHARSET )
+			/* translators: %s: target collation, e.g. utf8mb4_unicode_ci */
+			? sprintf( __( 'Character set conversion results (target: %s)', 'utf8-database-converter' ), (string) ( $data['collation'] ?? self::TARGET_COLLATION ) )
 			/* translators: %s: target storage engine, e.g. InnoDB */
 			: sprintf( __( 'Engine conversion results (target: %s)', 'utf8-database-converter' ), self::TARGET_ENGINE );
 
@@ -755,9 +779,9 @@ final class UTF8_Database_Converter {
 									<td>
 										<?php echo esc_html( (string) $t['collation'] ); ?>
 										<?php if ( 'good' === $state ) : ?>
-											<span style="color:#46b450;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4_unicode_ci — this is the target, nothing to do.', 'utf8-database-converter' ); ?>">✔</span>
+											<span style="color:#46b450;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4_unicode_ci or utf8mb4_unicode_520_ci — an accepted target, nothing to do.', 'utf8-database-converter' ); ?>">✔</span>
 										<?php elseif ( 'ok' === $state ) : ?>
-											<span style="color:#ffb900;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4, just a different collation — fine as-is, but can be converted to utf8mb4_unicode_ci.', 'utf8-database-converter' ); ?>">✔</span>
+											<span style="color:#ffb900;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4, just a different collation — fine as-is, but can be converted to utf8mb4_unicode_ci or utf8mb4_unicode_520_ci.', 'utf8-database-converter' ); ?>">✔</span>
 										<?php endif; ?>
 									</td>
 								</tr>
@@ -765,21 +789,33 @@ final class UTF8_Database_Converter {
 						</tbody>
 					</table>
 					<p style="max-width:900px;">
-						<span style="color:#46b450;font-weight:bold;">✔</span> <?php esc_html_e( 'already utf8mb4_unicode_ci (left unselected)', 'utf8-database-converter' ); ?> ·
+						<span style="color:#46b450;font-weight:bold;">✔</span> <?php esc_html_e( 'already utf8mb4_unicode_ci or utf8mb4_unicode_520_ci (left unselected)', 'utf8-database-converter' ); ?> ·
 						<span style="color:#ffb900;font-weight:bold;">✔</span> <?php esc_html_e( 'utf8mb4 with another collation — fine, optionally convertible (pre-selected)', 'utf8-database-converter' ); ?> ·
 						<?php esc_html_e( 'no mark: non-utf8mb4 (pre-selected)', 'utf8-database-converter' ); ?>
+					</p>
+
+					<h3><?php esc_html_e( 'Choose the target collation', 'utf8-database-converter' ); ?></h3>
+					<ul style="max-width:900px;list-style:disc;margin-left:2em;">
+						<li><code>utf8mb4_unicode_ci</code>: <?php esc_html_e( 'A faster collation based on UCA 4.0.0, trading some linguistic accuracy for speed.', 'utf8-database-converter' ); ?></li>
+						<li><code>utf8mb4_unicode_520_ci</code>: <?php esc_html_e( 'A more linguistically accurate collation based on UCA 5.2.0, trading speed for correctness.', 'utf8-database-converter' ); ?></li>
+					</ul>
+					<p>
+						<label for="utf8dc-collation"><strong><?php esc_html_e( 'Convert to:', 'utf8-database-converter' ); ?></strong></label>
+						<select name="utf8dc_collation" id="utf8dc-collation">
+							<option value="utf8mb4_unicode_ci" selected>utf8mb4_unicode_ci</option>
+							<option value="utf8mb4_unicode_520_ci">utf8mb4_unicode_520_ci</option>
+						</select>
 					</p>
 					<p style="max-width:900px;">
 						<?php
 						printf(
-							/* translators: 1: target character set, 2: target collation */
-							esc_html__( 'Selected tables (and all their text columns) will be converted to %1$s with the %2$s collation using ALTER TABLE … CONVERT TO CHARACTER SET.', 'utf8-database-converter' ),
-							'<code>' . esc_html( self::TARGET_CHARSET ) . '</code>',
-							'<code>' . esc_html( self::TARGET_COLLATION ) . '</code>'
+							/* translators: %s: target character set, e.g. utf8mb4 */
+							esc_html__( 'Selected tables (and all their text columns) will be converted to %s with the chosen collation using ALTER TABLE … CONVERT TO CHARACTER SET.', 'utf8-database-converter' ),
+							'<code>' . esc_html( self::TARGET_CHARSET ) . '</code>'
 						);
 						?>
 					</p>
-					<?php submit_button( __( 'Convert selected tables to utf8mb4', 'utf8-database-converter' ), 'primary', 'submit', false ); ?>
+					<?php submit_button( __( 'Convert selected tables to utf8mb4_unicode_ci', 'utf8-database-converter' ), 'primary', 'submit', false, array( 'id' => 'utf8dc-charset-submit' ) ); ?>
 				</form>
 			<?php endif; ?>
 
@@ -828,6 +864,14 @@ final class UTF8_Database_Converter {
 			}
 			wire('utf8dc-charset-all', 'utf8dc-charset-none', '.utf8dc-charset-cb', 'utf8dc-charset-legacy');
 			wire('utf8dc-engine-all', 'utf8dc-engine-none', '.utf8dc-engine-cb', null);
+
+			var collation = document.getElementById('utf8dc-collation'),
+				submitBtn = document.getElementById('utf8dc-charset-submit');
+			if (collation && submitBtn) {
+				collation.addEventListener('change', function () {
+					submitBtn.value = 'Convert selected tables to ' + collation.value;
+				});
+			}
 		})();
 		</script>
 		<?php
