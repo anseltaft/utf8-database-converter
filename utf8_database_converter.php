@@ -55,20 +55,41 @@ final class UTF8_Database_Converter {
 
 	public static function init(): void {
 		add_action( 'admin_menu', array( __CLASS__, 'register_menu' ) );
+		add_action( 'network_admin_menu', array( __CLASS__, 'register_network_menu' ) );
 		add_action( 'admin_notices', array( __CLASS__, 'reminder_notice' ) );
+		add_action( 'network_admin_notices', array( __CLASS__, 'reminder_notice' ) );
 		add_action( 'admin_post_utf8dc_backup', array( __CLASS__, 'handle_backup' ) );
 		add_action( 'admin_post_utf8dc_download', array( __CLASS__, 'handle_download' ) );
 		add_action( 'admin_post_utf8dc_charset', array( __CLASS__, 'handle_charset' ) );
 		add_action( 'admin_post_utf8dc_engine', array( __CLASS__, 'handle_engine' ) );
 		add_action( 'admin_post_utf8dc_log', array( __CLASS__, 'handle_log_download' ) );
 		add_action( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
+		add_action( 'network_admin_plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
 		register_activation_hook( __FILE__, array( __CLASS__, 'activate' ) );
 		register_deactivation_hook( __FILE__, array( __CLASS__, 'deactivate' ) );
 	}
 
+	/** Capability required everywhere: super admin on multisite, admin otherwise. */
+	private static function capability(): string {
+		return is_multisite() ? 'manage_network_options' : 'manage_options';
+	}
+
+	/** Base admin URL for the context the plugin screen lives in. */
+	private static function admin_base(): string {
+		return is_multisite() ? network_admin_url() : admin_url();
+	}
+
+	private static function plugins_url(): string {
+		return self::admin_base() . 'plugins.php';
+	}
+
+	private static function admin_post_url(): string {
+		return self::admin_base() . 'admin-post.php';
+	}
+
 	/** Records the activation time so the reminder notice can fire 30 minutes later. */
 	public static function activate(): void {
-		update_option( self::OPTION_ACTIVATED, time(), false );
+		update_site_option( self::OPTION_ACTIVATED, time() );
 	}
 
 	/**
@@ -76,11 +97,11 @@ final class UTF8_Database_Converter {
 	 * active for more than 30 minutes, nudge the admin to deactivate and delete it.
 	 */
 	public static function reminder_notice(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( self::capability() ) ) {
 			return;
 		}
 
-		$activated = (int) get_option( self::OPTION_ACTIVATED, 0 );
+		$activated = (int) get_site_option( self::OPTION_ACTIVATED, 0 );
 		if ( ! $activated || ( time() - $activated ) < self::REMINDER_DELAY ) {
 			return;
 		}
@@ -94,31 +115,51 @@ final class UTF8_Database_Converter {
 		printf(
 			/* translators: %s: URL of the Plugins screen */
 			wp_kses_post( __( '<strong>UTF-8 Database Converter</strong> is still installed and activated. It is a one-off tool — once your conversion is done, please <a href="%s">deactivate and delete it</a>.', 'utf8-database-converter' ) ),
-			esc_url( admin_url( 'plugins.php' ) )
+			esc_url( self::plugins_url() )
 		);
 		echo '</p></div>';
 	}
 
 	public static function register_menu(): void {
+		if ( is_multisite() ) {
+			return; // On multisite the plugin lives in Network Admin only.
+		}
 		add_management_page(
 			__( 'UTF-8 Database Converter', 'utf8-database-converter' ),
 			__( 'UTF-8 DB Converter', 'utf8-database-converter' ),
-			'manage_options',
+			self::capability(),
 			self::MENU_SLUG,
 			array( __CLASS__, 'render_page' )
 		);
 	}
 
+	public static function register_network_menu(): void {
+		add_menu_page(
+			__( 'UTF-8 Database Converter', 'utf8-database-converter' ),
+			__( 'UTF-8 DB Converter', 'utf8-database-converter' ),
+			self::capability(),
+			self::MENU_SLUG,
+			array( __CLASS__, 'render_page' ),
+			self::menu_icon(),
+			99 // Bottom of the menu.
+		);
+	}
+
+	/** Inline SVG menu icon: the number 8. */
+	private static function menu_icon(): string {
+		$svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><text x="10" y="14.5" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#a7aaad">8</text></svg>';
+		return 'data:image/svg+xml;base64,' . base64_encode( $svg ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
+	}
+
 	public static function action_links( array $links ): array {
-		$url = admin_url( 'tools.php?page=' . self::MENU_SLUG );
-		array_unshift( $links, '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Convert', 'utf8-database-converter' ) . '</a>' );
+		array_unshift( $links, '<a href="' . esc_url( self::page_url() ) . '">' . esc_html__( 'Convert', 'utf8-database-converter' ) . '</a>' );
 		return $links;
 	}
 
 	public static function deactivate(): void {
 		self::log( 'Plugin deactivated — deleting backup archives and the debug log.' );
 		self::cleanup_backups();
-		delete_option( self::OPTION_ACTIVATED );
+		delete_site_option( self::OPTION_ACTIVATED );
 	}
 
 	/* --------------------------------------------------------------------- *
@@ -191,11 +232,14 @@ final class UTF8_Database_Converter {
 	}
 
 	private static function page_url(): string {
+		if ( is_multisite() ) {
+			return network_admin_url( 'admin.php?page=' . self::MENU_SLUG );
+		}
 		return admin_url( 'tools.php?page=' . self::MENU_SLUG );
 	}
 
 	private static function require_capability(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( self::capability() ) ) {
 			wp_die(
 				esc_html__( 'Sorry, you are not allowed to access this page.', 'utf8-database-converter' ),
 				esc_html__( 'Forbidden', 'utf8-database-converter' ),
@@ -429,7 +473,7 @@ final class UTF8_Database_Converter {
 			@unlink( $sql_path );
 			self::log( 'Backup archive created (' . size_format( (float) filesize( $zip_path ) ) . '); starting download.' );
 
-			set_transient( self::download_key(), $zip_path, self::BACKUP_TTL );
+			set_site_transient( self::download_key(), $zip_path, self::BACKUP_TTL );
 
 			wp_safe_redirect(
 				add_query_arg(
@@ -437,7 +481,7 @@ final class UTF8_Database_Converter {
 						'action'   => 'utf8dc_download',
 						'_wpnonce' => wp_create_nonce( self::NONCE_DOWNLOAD ),
 					),
-					admin_url( 'admin-post.php' )
+					self::admin_post_url()
 				)
 			);
 			exit;
@@ -456,7 +500,7 @@ final class UTF8_Database_Converter {
 		self::require_capability();
 		check_admin_referer( self::NONCE_DOWNLOAD );
 
-		$path     = get_transient( self::download_key() );
+		$path     = get_site_transient( self::download_key() );
 		$real_dir = realpath( self::backup_dir() );
 
 		$valid = is_string( $path )
@@ -479,7 +523,7 @@ final class UTF8_Database_Converter {
 		readfile( $path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 		@unlink( $path );
-		delete_transient( self::download_key() );
+		delete_site_transient( self::download_key() );
 		self::log( 'Backup archive downloaded by the browser and deleted from the server.' );
 		exit;
 	}
@@ -572,7 +616,7 @@ final class UTF8_Database_Converter {
 			$results = empty( $tables ) ? array() : self::convert_charset( $tables, $collation );
 			self::log( 'Character set conversion finished: ' . count( array_filter( $results, fn( $r ) => $r['ok'] ) ) . ' succeeded, ' . count( array_filter( $results, fn( $r ) => ! $r['ok'] ) ) . ' failed.' );
 
-			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'collation' => $collation, 'results' => $results ), MINUTE_IN_SECONDS * 5 );
+			set_site_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'charset', 'collation' => $collation, 'results' => $results ), MINUTE_IN_SECONDS * 5 );
 			wp_safe_redirect( add_query_arg( 'utf8dc_done', 'charset', self::page_url() ) );
 			exit;
 		} catch ( Throwable $e ) {
@@ -593,7 +637,7 @@ final class UTF8_Database_Converter {
 			$results = empty( $tables ) ? array() : self::convert_engine( $tables );
 			self::log( 'Engine conversion finished: ' . count( array_filter( $results, fn( $r ) => $r['ok'] ) ) . ' succeeded, ' . count( array_filter( $results, fn( $r ) => ! $r['ok'] ) ) . ' failed.' );
 
-			set_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'engine', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
+			set_site_transient( 'utf8dc_results_' . get_current_user_id(), array( 'type' => 'engine', 'results' => $results ), MINUTE_IN_SECONDS * 5 );
 			wp_safe_redirect( add_query_arg( 'utf8dc_done', 'engine', self::page_url() ) );
 			exit;
 		} catch ( Throwable $e ) {
@@ -639,9 +683,9 @@ final class UTF8_Database_Converter {
 		self::require_capability();
 		self::sweep_expired_backups();
 
-		$flash = get_transient( 'utf8dc_results_' . get_current_user_id() );
+		$flash = get_site_transient( 'utf8dc_results_' . get_current_user_id() );
 		if ( is_array( $flash ) ) {
-			delete_transient( 'utf8dc_results_' . get_current_user_id() );
+			delete_site_transient( 'utf8dc_results_' . get_current_user_id() );
 		}
 
 		$tables    = self::tables_info();
@@ -665,7 +709,7 @@ final class UTF8_Database_Converter {
 						printf(
 							/* translators: %s: URL of the Plugins screen */
 							wp_kses_post( __( 'Every table already uses <code>utf8mb4</code> and no MyISAM tables remain. This plugin has finished its job — for security and cleanliness, please <a href="%s">deactivate and delete it now</a>.', 'utf8-database-converter' ) ),
-							esc_url( admin_url( 'plugins.php' ) )
+							esc_url( self::plugins_url() )
 						);
 					?></p>
 				</div>
@@ -685,7 +729,7 @@ final class UTF8_Database_Converter {
 					'<code>' . esc_html( sanitize_file_name( DB_NAME ) . '.sql.zip' ) . '</code>'
 				);
 			?></p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<form method="post" action="<?php echo esc_url( self::admin_post_url() ); ?>">
 				<input type="hidden" name="action" value="utf8dc_backup" />
 				<?php wp_nonce_field( self::NONCE_BACKUP ); ?>
 				<?php submit_button( __( 'Back up & download now', 'utf8-database-converter' ), 'primary', 'submit', false ); ?>
@@ -703,7 +747,7 @@ final class UTF8_Database_Converter {
 					printf( esc_html__( 'No MyISAM tables found — everything already uses %s or another engine.', 'utf8-database-converter' ), esc_html( self::TARGET_ENGINE ) );
 				?></p>
 			<?php else : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<form method="post" action="<?php echo esc_url( self::admin_post_url() ); ?>">
 					<input type="hidden" name="action" value="utf8dc_engine" />
 					<?php wp_nonce_field( self::NONCE_ENGINE ); ?>
 					<p>
@@ -750,7 +794,7 @@ final class UTF8_Database_Converter {
 			<?php if ( empty( $base ) ) : ?>
 				<p><?php esc_html_e( 'No tables were found in this database.', 'utf8-database-converter' ); ?></p>
 			<?php else : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<form method="post" action="<?php echo esc_url( self::admin_post_url() ); ?>">
 					<input type="hidden" name="action" value="utf8dc_charset" />
 					<?php wp_nonce_field( self::NONCE_CHARSET ); ?>
 					<p>
@@ -830,7 +874,7 @@ final class UTF8_Database_Converter {
 				);
 			?></p>
 			<?php if ( $log_exists ) : ?>
-				<p><a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=utf8dc_log' ), self::NONCE_LOG ) ); ?>"><?php esc_html_e( 'Download debug log', 'utf8-database-converter' ); ?></a></p>
+				<p><a class="button" href="<?php echo esc_url( wp_nonce_url( self::admin_post_url() . '?action=utf8dc_log', self::NONCE_LOG ) ); ?>"><?php esc_html_e( 'Download debug log', 'utf8-database-converter' ); ?></a></p>
 			<?php else : ?>
 				<p><em><?php esc_html_e( 'No log entries yet — run a backup or conversion first.', 'utf8-database-converter' ); ?></em></p>
 			<?php endif; ?>
@@ -842,7 +886,7 @@ final class UTF8_Database_Converter {
 				printf(
 					/* translators: %s: URL of the Plugins screen */
 					wp_kses_post( __( 'Once your conversions are complete and you have verified your site works correctly, this plugin has served its purpose. Please <a href="%s">deactivate and delete it</a> — leaving unused administrative tools installed is a security risk. Deactivation also deletes any leftover backup archives and the debug log.', 'utf8-database-converter' ) ),
-					esc_url( admin_url( 'plugins.php' ) )
+					esc_url( self::plugins_url() )
 				);
 			?></p>
 		</div>

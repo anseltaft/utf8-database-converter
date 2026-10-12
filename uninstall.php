@@ -17,6 +17,7 @@ ob_start();
 
 try {
 	delete_option( 'utf8dc_activated_at' );
+	delete_site_option( 'utf8dc_activated_at' );
 
 	$utf8dc_dir = trailingslashit( WP_CONTENT_DIR ) . 'utf8dc-backups/';
 	if ( is_dir( $utf8dc_dir ) ) {

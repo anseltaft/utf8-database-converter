@@ -15,7 +15,7 @@ This is a modernization of Yihui Xie's original 2009–2011 plugin, rewritten fo
 - PHP 7.4 through 8.5
 - MySQL 5.5+ or MariaDB 10.x (any version supporting `utf8mb4`)
 - The PHP **Zip extension** (`ZipArchive`) for compressed backups
-- A WordPress administrator account (`manage_options` capability)
+- A WordPress administrator account (`manage_options`, or `manage_network_options` super admin on multisite)
 
 ## Installation
 
@@ -26,9 +26,18 @@ This is a modernization of Yihui Xie's original 2009–2011 plugin, rewritten fo
 5. Go to **Tools → UTF-8 DB Converter** to use it.
 6. *Please remember to deactivate then delete the plugin when you're done using it!*
 
+## Multisite
+
+On WordPress Multisite the plugin works network-wide:
+
+- **Network-activate** it from **Network Admin → Plugins** (per-site activation on a subsite is intentionally not offered — schema changes affect the shared database of the whole network).
+- It then appears as a **main menu item (icon: "8") at the bottom of the Network Admin menu**, and requires the `manage_network_options` capability (super admin).
+- The table list covers **all tables in the network's database** — every site's tables — and conversions apply to the shared database. Back up once (Section 1) before converting; that backup covers the entire network.
+- The 30-minute removal reminder is shown in both the Network Admin and site admin areas.
+
 ## Usage
 
-Find the plugin under **Tools → UTF-8 DB Converter**. The admin screen is divided into these sections:
+Find the plugin under **Tools → UTF-8 DB Converter** (single site) or the **UTF-8 DB Converter** main menu item at the bottom of the Network Admin menu (multisite). The admin screen is divided into these sections:
 
 ### Section 1 — Back up the entire database
 
