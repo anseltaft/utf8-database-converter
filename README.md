@@ -48,7 +48,7 @@ ALTER TABLE `table_name` ENGINE=InnoDB;
 
 Every table is listed with its engine and current collation:
 
-- ✅ `utf8mb4_unicode_ci` — the target, left **unselected** (nothing to do).
+- ✔ (green) `utf8mb4_unicode_ci` — the target, left **unselected** (nothing to do).
 - ✔ (yellow) other `utf8mb4` collations such as `utf8mb4_unicode_520_ci` — fine as-is, but can be converted to `utf8mb4_unicode_ci`; pre-selected.
 - No mark — any non-`utf8mb4` charset/collation; pre-selected.
 

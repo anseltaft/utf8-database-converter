@@ -755,7 +755,7 @@ final class UTF8_Database_Converter {
 									<td>
 										<?php echo esc_html( (string) $t['collation'] ); ?>
 										<?php if ( 'good' === $state ) : ?>
-											<span style="color:#46b450;" title="<?php esc_attr_e( 'Already utf8mb4_unicode_ci — this is the target, nothing to do.', 'utf8-database-converter' ); ?>">✅</span>
+											<span style="color:#46b450;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4_unicode_ci — this is the target, nothing to do.', 'utf8-database-converter' ); ?>">✔</span>
 										<?php elseif ( 'ok' === $state ) : ?>
 											<span style="color:#ffb900;font-weight:bold;" title="<?php esc_attr_e( 'Already utf8mb4, just a different collation — fine as-is, but can be converted to utf8mb4_unicode_ci.', 'utf8-database-converter' ); ?>">✔</span>
 										<?php endif; ?>
@@ -765,7 +765,7 @@ final class UTF8_Database_Converter {
 						</tbody>
 					</table>
 					<p style="max-width:900px;">
-						<span style="color:#46b450;">✅</span> <?php esc_html_e( 'already utf8mb4_unicode_ci (left unselected)', 'utf8-database-converter' ); ?> ·
+						<span style="color:#46b450;font-weight:bold;">✔</span> <?php esc_html_e( 'already utf8mb4_unicode_ci (left unselected)', 'utf8-database-converter' ); ?> ·
 						<span style="color:#ffb900;font-weight:bold;">✔</span> <?php esc_html_e( 'utf8mb4 with another collation — fine, optionally convertible (pre-selected)', 'utf8-database-converter' ); ?> ·
 						<?php esc_html_e( 'no mark: non-utf8mb4 (pre-selected)', 'utf8-database-converter' ); ?>
 					</p>
